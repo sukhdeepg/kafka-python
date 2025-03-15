@@ -9,6 +9,28 @@ A simple demonstration of Kafka with Python and FastAPI, showing a real-world e-
 - **Manual Offset Commitment**: Explicit consumer offset management.
 - **Detailed Logging**: Comprehensive logging for understanding Kafka concepts.
 
+## Screenshots
+- Creating an order
+<img width="598" alt="Screenshot 2025-03-15 at 9 46 15 PM" src="https://github.com/user-attachments/assets/f1d50af7-3ad1-42b1-9bb3-a039b68d8dc6" />
+
+- Sending message to the partition
+<img width="602" alt="Screenshot 2025-03-15 at 9 46 36 PM" src="https://github.com/user-attachments/assets/09d402e5-a556-4f04-a246-6b9855e82de5" />
+
+- Showing how many records did we get in the message
+<img width="637" alt="Screenshot 2025-03-15 at 9 47 12 PM" src="https://github.com/user-attachments/assets/5af06824-a397-4ad2-9a88-dc3217250396" />
+
+- Consumer processing the message
+<img width="606" alt="Screenshot 2025-03-15 at 9 47 41 PM" src="https://github.com/user-attachments/assets/ac53f97f-d935-4176-aca9-22c374917b3a" />
+
+- Consumer committed the offset
+<img width="603" alt="Screenshot 2025-03-15 at 9 48 20 PM" src="https://github.com/user-attachments/assets/71eebbd7-6a87-4ff1-a202-d7cb73fe14c1" />
+
+- Testing idempotency
+<img width="594" alt="Screenshot 2025-03-15 at 9 57 13 PM" src="https://github.com/user-attachments/assets/00d6194b-9afe-4ab5-b9b3-e343c226be5d" />
+
+- Testing simulated failure
+<img width="613" alt="Screenshot 2025-03-15 at 10 07 30 PM" src="https://github.com/user-attachments/assets/f0b66c95-f0dd-4648-bf47-4c28477e60be" />
+
 ## Architecture
 This demo simulates an e-commerce order processing system:
 
