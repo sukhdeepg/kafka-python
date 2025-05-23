@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from loguru import logger
 import kafka.errors
-from kafka import KafkaProducer, KafkaConsumer, TopicPartition
+from kafka import KafkaProducer, KafkaConsumer
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.consumer.subscription_state import OffsetAndMetadata
 
