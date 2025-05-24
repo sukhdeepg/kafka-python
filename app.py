@@ -12,51 +12,55 @@ from kafka import KafkaProducer, KafkaConsumer
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.consumer.subscription_state import OffsetAndMetadata
 
-# Configure logger
+# Configure structured logging with file rotation
 logger.remove()
 logger.add(
     "kafka_app.log",
     format="{time} | {level} | {message}",
     level="INFO",
-    rotation="10 MB"
+    rotation="10 MB"  # Rotate log files when they reach 10MB
 )
 logger.add(lambda msg: print(msg), level="INFO")
 
+# Kafka configuration constants
 KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
 ORDER_TOPIC = "order-events"
-DLQ_TOPIC = "order-events-dlq"
-CONSUMER_GROUP = "order-processor"
+DLQ_TOPIC = "order-events-dlq"  # Dead Letter Queue for failed messages
+CONSUMER_GROUP = "order-processor"  # Consumer group for load balancing
 
 app = FastAPI(title="Kafka with Python")
 
+# Pydantic models for request/response validation
 class OrderItem(BaseModel):
     product_id: str
     quantity: int
     price: float
 
 class Order(BaseModel):
-    order_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    order_id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # Auto-generate unique ID
     customer_id: str
     items: List[OrderItem]
     total_amount: float
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
-    idempotency_key: Optional[str] = None
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())  # Auto-timestamp
+    idempotency_key: Optional[str] = None  # For preventing duplicate message processing
 
+# Global Kafka components - initialized at startup
 producer = None
 admin_client = None
 consumer = None
-processed_orders = set()  # For simple idempotency check
+processed_orders = set()  # In-memory set for simple idempotency tracking
 consumer_running = False
 
 # Dictionary to track orders being processed (request_id -> order_id)
-# This is used to prevent duplicate submissions
+# This prevents duplicate API submissions before Kafka processing
 processing_orders = {}
 
 @app.on_event("startup")
 async def startup_event():
+    """Initialize Kafka components with connection retry logic"""
     global producer, admin_client, consumer, consumer_running
     
-    # Wait for Kafka to be ready
+    # Wait for Kafka to be ready with retry mechanism
     max_retries = 10
     retry_count = 0
     
@@ -64,7 +68,7 @@ async def startup_event():
         try:
             logger.info("Attempting to connect to Kafka...")
             
-            # Initialize admin client to create topics
+            # Initialize admin client to create and manage topics
             admin_client = KafkaAdminClient(
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                 client_id='kafka-admin-client'
@@ -72,7 +76,12 @@ async def startup_event():
             
             # Create topics if they don't exist
             topic_list = []
+            # Main topic with 3 partitions for parallel processing and load distribution
+            # replication_factor=1 means each message is stored on only 1 broker (no redundancy)
+            # In production, use replication_factor=3 for fault tolerance
             topic_list.append(NewTopic(name=ORDER_TOPIC, num_partitions=3, replication_factor=1))
+            # DLQ with single partition since failed messages are typically low volume
+            # replication_factor=1 means no backup copies (acceptable for DLQ in dev/test)
             topic_list.append(NewTopic(name=DLQ_TOPIC, num_partitions=1, replication_factor=1))
             
             try:
@@ -81,13 +90,13 @@ async def startup_event():
             except kafka.errors.TopicAlreadyExistsError:
                 logger.info("Topics already exist")
                 
-            # Initialize producer
+            # Initialize producer with reliability configurations
             producer = KafkaProducer(
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                key_serializer=lambda v: v.encode('utf-8') if v else None,
-                acks='all',  # Wait for all replicas to acknowledge the message
-                max_in_flight_requests_per_connection=1  # Ensure ordering
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),  # JSON serialization
+                key_serializer=lambda v: v.encode('utf-8') if v else None,  # String key serialization
+                acks='all',  # Wait for all in-sync replicas to acknowledge (highest durability)
+                max_in_flight_requests_per_connection=1  # Ensure strict message ordering
             )
             
             logger.info("Successfully connected to Kafka")
@@ -99,7 +108,7 @@ async def startup_event():
             if retry_count >= max_retries:
                 logger.error("Max retries reached, could not connect to Kafka")
                 raise
-            await asyncio.sleep(5)
+            await asyncio.sleep(5)  # Wait before retry
     
     # Start the consumer in a background task
     consumer_running = True
