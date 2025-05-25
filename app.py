@@ -116,9 +116,10 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """Gracefully shutdown all Kafka components"""
     global consumer_running
     
-    # Signal consumer to stop
+    # Signal consumer to stop processing
     consumer_running = False
     
     if producer:
@@ -130,73 +131,87 @@ async def shutdown_event():
         admin_client.close()
 
 async def run_consumer():
-    """Background task to run the Kafka consumer"""
+    """Background task to run the Kafka consumer and process messages"""
     logger.info("Starting Kafka consumer...")
     global consumer, consumer_running
     
     try:
+        # Initialize consumer with manual offset management for better control
         consumer = KafkaConsumer(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            group_id=CONSUMER_GROUP,
-            auto_offset_reset='earliest',  # Start from the earliest message if no offset is stored
-            enable_auto_commit=False,  # Manual commit for better control
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            key_deserializer=lambda m: m.decode('utf-8') if m else None
+            group_id=CONSUMER_GROUP,  # Consumer group enables load balancing across multiple consumers
+            auto_offset_reset='earliest',  # Start from beginning if no committed offset exists
+            enable_auto_commit=False,  # Disable automatic offset commits for precise error handling
+            value_deserializer=lambda m: json.loads(m.decode('utf-8')),  # JSON deserialization
+            key_deserializer=lambda m: m.decode('utf-8') if m else None  # String key deserialization
         )
         
+        # Subscribe to the main order topic
         consumer.subscribe([ORDER_TOPIC])
         logger.info(f"Consumer subscribed to {ORDER_TOPIC}")
         
+        # Main consumer polling loop
         while consumer_running:
             try:
-                # Poll for messages with a timeout
+                # Poll for messages with 1 second timeout
                 messages = consumer.poll(timeout_ms=1000)
                 
                 if not messages:
-                    # No messages received during this poll
+                    # No messages received during this poll cycle
                     await asyncio.sleep(0.1)
                     continue
                     
                 logger.info(f"Received {sum(len(records) for records in messages.values())} messages from Kafka")
                 
+                # Process messages grouped by topic partition
                 for tp, records in messages.items():
                     for record in records:
                         try:
                             logger.info(f"Processing record: partition={tp.partition}, offset={record.offset}, key={record.key}")
                             
-                            # Check for idempotency based on order_id first (most reliable)
+                            # DUAL-LAYER IDEMPOTENCY PROTECTION:
+                            
+                            # Layer 1: Business-level deduplication using order_id
+                            # Prevents processing the same business order multiple times
+                            # This handles cases where the same order gets submitted multiple times
                             order_id = record.value.get('order_id')
                             if order_id in processed_orders:
                                 logger.info(f"Skipping duplicate order with order_id: {order_id}")
                                 
-                                # Still commit the offset even for duplicates
+                                # Commit offset even for duplicates to avoid reprocessing
                                 consumer.commit({
                                     tp: OffsetAndMetadata(record.offset + 1, None)
                                 })
                                 logger.info(f"Committed offset {record.offset + 1} for partition {tp.partition} (duplicate message)")
                                 continue
                             
-                            # Then check idempotency_key if provided
+                            # Layer 2: Client-provided idempotency key deduplication
+                            # Handles cases where client retries failed API calls with same idempotency key
+                            # Client can provide same key for retries to ensure exactly-once processing
                             idempotency_key = record.value.get('idempotency_key')
                             if idempotency_key and idempotency_key in processed_orders:
                                 logger.info(f"Skipping duplicate order with idempotency_key: {idempotency_key}")
                                 
-                                # Still commit the offset even for duplicates
+                                # Commit offset for duplicate message
                                 consumer.commit({
                                     tp: OffsetAndMetadata(record.offset + 1, None)
                                 })
                                 logger.info(f"Committed offset {record.offset + 1} for partition {tp.partition} (duplicate message)")
                                 continue
                             
-                            # Process the order
+                            # Process the order (business logic)
                             await process_order(record.value)
                             
-                            # Add to processed orders set for idempotency
+                            # Track both identifiers for comprehensive idempotency protection
+                            # order_id: Prevents duplicate business orders
+                            # idempotency_key: Prevents duplicate client retries
                             processed_orders.add(order_id)
                             if idempotency_key:
                                 processed_orders.add(idempotency_key)
                             
-                            # Commit offset for this message
+                            # Manual offset commit after successful processing
+                            # Offset+1 because we want to commit the NEXT message to be consumed
+                            # This ensures we don't reprocess this message if consumer restarts
                             consumer.commit({
                                 tp: OffsetAndMetadata(record.offset + 1, None)
                             })
@@ -206,10 +221,10 @@ async def run_consumer():
                             error_message = f"Error processing message: {str(e)}\n{traceback.format_exc()}"
                             logger.error(error_message)
                             
-                            # Send to Dead Letter Queue
+                            # Send failed message to Dead Letter Queue for manual review
                             send_to_dlq(record.value, str(e))
                             
-                            # Still commit the offset to avoid reprocessing the same failed message
+                            # Commit offset to prevent infinite retry of same failed message
                             consumer.commit({
                                 tp: OffsetAndMetadata(record.offset + 1, None)
                             })
@@ -221,7 +236,7 @@ async def run_consumer():
             except Exception as e:
                 error_message = f"Error in consumer poll loop: {str(e)}\n{traceback.format_exc()}"
                 logger.error(error_message)
-                await asyncio.sleep(5)  # Wait a bit before retrying
+                await asyncio.sleep(5)  # Wait before retrying poll loop
             
     except Exception as e:
         error_message = f"Consumer error: {str(e)}\n{traceback.format_exc()}"
