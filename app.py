@@ -250,59 +250,62 @@ async def run_consumer():
                 logger.error(f"Error closing consumer: {str(e)}")
 
 async def process_order(order_data: Dict[str, Any]):
-    """Process an order from Kafka"""
+    """Process an order from Kafka - contains business logic"""
     logger.info(f"Processing order: {order_data['order_id']}")
     
-    # Simulate processing time
+    # Simulate processing time (database operations, external API calls, etc.)
     await asyncio.sleep(0.5)
     
-    # Enhanced failure simulation - check multiple fields
+    # Simulate business logic failure conditions
     should_fail = False
     failure_reason = []
     
-    # Check if customer_id ends with 'f'
+    # Example business rule: fail orders for customers ending with 'f'
     if order_data['customer_id'].endswith('f'):
         should_fail = True
         failure_reason.append("customer_id ends with 'f'")
     
-    # Simulate failure if any of the conditions are met
+    # Raise exception to trigger error handling and DLQ
     if should_fail:
         raise Exception(f"Order processing failed (simulated error): {', '.join(failure_reason)}")
     
     logger.info(f"Successfully processed order: {order_data['order_id']}")
 
 def send_to_dlq(message: Dict[str, Any], error_reason: str):
-    """Send a failed message to the Dead Letter Queue"""
+    """Send a failed message to the Dead Letter Queue with error context"""
     if not producer:
         logger.error("Producer not initialized")
         return
     
-    # Add error information
+    # Enrich message with error information for debugging
     dlq_message = message.copy()
     dlq_message['error'] = {
         'reason': error_reason,
         'timestamp': datetime.now().isoformat()
     }
     
-    # Send to DLQ
+    # Send to DLQ topic for manual investigation
     producer.send(
         DLQ_TOPIC,
-        key=message.get('order_id', str(uuid.uuid4())),
+        key=message.get('order_id', str(uuid.uuid4())),  # Use order_id as key
         value=dlq_message
     )
-    producer.flush()
+    producer.flush()  # Ensure message is sent immediately
     logger.info(f"Sent message to DLQ: {message.get('order_id')}")
 
 @app.post("/orders/", status_code=201)
 async def create_order(order: Order, request: Request, x_idempotency_key: Optional[str] = Header(None)):
-    """Create a new order and send it to Kafka"""
+    """Create a new order and send it to Kafka topic"""
     if not producer:
         raise HTTPException(status_code=503, detail="Kafka producer not available")
     
-    # Use provided idempotency key or generate one if not provided
+    # IDEMPOTENCY AT API LEVEL:
+    # Generate client-specific idempotency key if not provided in header
+    # This prevents duplicate API requests before they even reach Kafka
     client_idempotency_key = x_idempotency_key or f"client-{request.client.host}-{datetime.now().isoformat()}"
     
-    # Check if this order is already being processed (prevent duplicate submission)
+    # Check if this exact API request is already being processed
+    # This is different from Kafka-level idempotency - it's API-level protection
     if client_idempotency_key in processing_orders:
         logger.info(f"Duplicate request detected with idempotency key: {client_idempotency_key}")
         order_id = processing_orders[client_idempotency_key]
@@ -312,25 +315,29 @@ async def create_order(order: Order, request: Request, x_idempotency_key: Option
             "duplicate": True
         }
     
-    # Set order idempotency key if provided via header
+    # Set idempotency key from header if provided
     if x_idempotency_key:
         order.idempotency_key = x_idempotency_key
     
     order_dict = order.model_dump()
     logger.info(f"Creating order: {order.order_id} with idempotency key: {order.idempotency_key}")
     
-    # Track that we're processing this order
+    # Track that we're processing this order to prevent duplicates
     processing_orders[client_idempotency_key] = order.order_id
     
     try:
-        # Send to Kafka with the order_id as the key for partitioning
+        # Send to Kafka with order_id as partition key for related message grouping
+        # Partition key ensures orders from same customer/order go to same partition
+        # This maintains ordering for related messages within the partition
         future = producer.send(
             ORDER_TOPIC,
-            key=order.order_id,
+            key=order.order_id,  # Partition key for message routing and ordering
             value=order_dict
         )
         
-        # Wait for the send to complete and get metadata
+        # Wait for send confirmation and get metadata
+        # get() blocks until message is acknowledged by Kafka brokers
+        # timeout=10 prevents indefinite blocking
         record_metadata = future.get(timeout=10)
         logger.info(f"Message sent to {record_metadata.topic} partition {record_metadata.partition} offset {record_metadata.offset}")
         
@@ -345,7 +352,7 @@ async def create_order(order: Order, request: Request, x_idempotency_key: Option
         }
     except Exception as e:
         logger.error(f"Failed to send message: {str(e)}")
-        # Remove from processing orders on failure
+        # Remove from processing orders on failure to allow retry
         if client_idempotency_key in processing_orders:
             del processing_orders[client_idempotency_key]
         raise HTTPException(status_code=500, detail=f"Failed to send message to Kafka: {str(e)}")
