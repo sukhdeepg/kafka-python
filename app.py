@@ -359,8 +359,9 @@ async def create_order(order: Order, request: Request, x_idempotency_key: Option
 
 @app.get("/")
 async def root():
+    """Health check endpoint"""
     return {"message": "Kafka with Python - Use /docs to see the API documentation"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
